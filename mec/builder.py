@@ -18,6 +18,8 @@ class MEC(nn.Module):
         # num_classes is the output fc dimension, zero-initialize last BNs
         self.encoder = base_encoder(num_classes=dim, zero_init_residual=True)
 
+        self.encoder.conv1 = nn.Conv2d(1, self.encoder.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
+
         # build a 3-layer projector
         prev_dim = self.encoder.fc.weight.shape[1]
         self.encoder.fc = nn.Sequential(nn.Linear(prev_dim, prev_dim, bias=False),
@@ -35,7 +37,6 @@ class MEC(nn.Module):
                                         nn.BatchNorm1d(pred_dim),
                                         nn.ReLU(inplace=True), # hidden layer
                                         nn.Linear(pred_dim, dim)) # output layer
-
 
         self.teacher = copy.deepcopy(self.encoder)
         for p in self.teacher.parameters():
