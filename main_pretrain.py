@@ -34,6 +34,9 @@ import numpy as np
 import mec.loader
 import mec.builder
 
+from mec.cropper import RandomMultiScaleCropd
+from mec.tma_loader import TMA_Datamodule
+
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -223,49 +226,64 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    traindir = os.path.join(args.data, 'train')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
+    # traindir = os.path.join(args.data, 'train')
+    # normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+    #                                  std=[0.229, 0.224, 0.225])
 
-    # follow MoCov3's augmentation recipe
-    augmentation1 = [
-        transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
-        transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-        ], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([mec.loader.GaussianBlur([.1, 2.])], p=1.0),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize
+    # # follow MoCov3's augmentation recipe
+
+
+    # train_dataset = datasets.ImageFolder(
+    #     traindir,
+    #     mec.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
+    #                                   transforms.Compose(augmentation2)))
+
+    # if args.distributed:
+    #     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+    # else:
+    #     train_sampler = None
+
+    # train_loader = torch.utils.data.DataLoader(
+    #     train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+    #     num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+
+    normalization_data = {'1_AF488': (682.0776, 1358.4601),
+    '1_AF555': (169.55586, 209.92102),
+    '1_AF647': (642.41504, 1808.3195),
+    '1_AF750': (292.6707, 313.36597),
+    '1_DAPI': (1510.9457, 2075.8213),
+    '2_AF647': (1369.3427, 2853.1277)}
+
+    normalize = [mt.LoadImaged(keys=normalization_data.keys())]
+    for k, v in normalization_data.items():
+        normalize.append(mt.NormalizeIntensityd(keys=[k], subtrahend = v[0], divisor = v[1]))
+    
+    normalize += [
+        mt.ConcatItemsd(keys = normalization_data.keys(), name = 'img'),
+        RandomMultiScaleCropd(keys = ['img'], roi_size=[224,224], selection_fn = lambda x: x.nonzero.mean()>0.9),
     ]
 
-    augmentation2 = [
-        transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
-        transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-        ], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([mec.loader.GaussianBlur([.1, 2.])], p=0.1),
-        transforms.RandomApply([mec.loader.Solarize()], p=0.2),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize
+    augmentation = [
+        mt.RandFlipd(prob=0.5, spatial_axis= [1,2]),
+        mt.RandRotate90d(prob=0.5, spatial_axes=[1,2]),
     ]
 
-    train_dataset = datasets.ImageFolder(
-        traindir,
-        mec.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
-                                      transforms.Compose(augmentation2)))
+    transforms = mt.Compose(normalize + [
+        mec.loader.TwoCropsTransform(transforms.Compose(augmentation), 
+        transforms.Compose(augmentation))
+    ])        
 
-    if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-    else:
-        train_sampler = None
+    df = pd.read_csv(train_dir/'train.csv')
 
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+    train_dataset = PersistentDatase(df, transform=transforms, cache_dir = './cache/train')
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
+        shuffle=True,
+        num_workers=args.workers,
+        pin_memory=False, 
+        sampler=None, 
+        drop_last=True,
+        persistent_workers=False
+    )
 
     momentum_schedule = cosine_scheduler(args.teacher_momentum, 1,
                                          args.epochs, len(train_loader))
