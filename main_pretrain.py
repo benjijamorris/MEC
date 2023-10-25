@@ -163,7 +163,7 @@ def main_worker(gpu, ngpus_per_node, args):
     # create model
     print("=> creating model '{}'".format(args.arch))
     model = mec.builder.MEC(
-        models.__dict__[args.arch],
+        models.__dict__[args.arch], num_channels=6,
         args.dim, args.pred_dim)
 
     # infer learning rate before changing batch size

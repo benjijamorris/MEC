@@ -7,7 +7,7 @@ class MEC(nn.Module):
     """
     Build a MEC model.
     """
-    def __init__(self, base_encoder, dim=2048, pred_dim=512):
+    def __init__(self, base_encoder,num_channels, dim=2048, pred_dim=512):
         """
         dim: feature dimension (default: 2048)
         pred_dim: hidden dimension of the predictor (default: 512)
@@ -16,7 +16,7 @@ class MEC(nn.Module):
 
         # create the encoder
         # num_classes is the output fc dimension, zero-initialize last BNs
-        self.encoder = base_encoder(num_channels, num_classes=dim, zero_init_residual=True)
+        self.encoder = base_encoder( num_classes=dim, zero_init_residual=True)
 
         self.encoder.conv1 = nn.Conv2d(num_channels, self.encoder.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
 
