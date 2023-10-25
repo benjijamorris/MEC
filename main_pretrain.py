@@ -33,9 +33,11 @@ import numpy as np
 
 import mec.loader
 import mec.builder
-
+import monai.transforms as mt
+import pandas as pd
 from mec.cropper import RandomMultiScaleCropd
-from mec.tma_loader import TMA_Datamodule
+#from mec.tma_loader import TMA_Datamodule
+from monai.data import PersistentDataset,DataLoader,Dataset
 
 
 model_names = sorted(name for name in models.__dict__
@@ -50,13 +52,13 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     help='model architecture: ' +
                         ' | '.join(model_names) +
                         ' (default: resnet50)')
-parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
+parser.add_argument('-j', '--workers', default=1, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
 parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=1024, type=int,
+parser.add_argument('-b', '--batch-size', default=16, type=int,
                     metavar='N',
                     help='mini-batch size (default: 1024), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -162,9 +164,7 @@ def main_worker(gpu, ngpus_per_node, args):
         torch.distributed.barrier()
     # create model
     print("=> creating model '{}'".format(args.arch))
-    model = mec.builder.MEC(
-        models.__dict__[args.arch], num_channels=6,
-        args.dim, args.pred_dim)
+    model = mec.builder.MEC(models.__dict__[args.arch], 6, args.dim, args.pred_dim)
 
     # infer learning rate before changing batch size
     total_batch_size = args.batch_size
@@ -194,10 +194,10 @@ def main_worker(gpu, ngpus_per_node, args):
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
         # comment out the following line for debugging
-        raise NotImplementedError("Only DistributedDataParallel is supported.")
-    else:
+        #raise NotImplementedError("Only DistributedDataParallel is supported.")
+    #else:
         # this code only supports DistributedDataParallel.
-        raise NotImplementedError("Only DistributedDataParallel is supported.")
+      #  raise NotImplementedError("Only DistributedDataParallel is supported.")
 
     # define SGD optimizer
     optim_params = model.parameters()
@@ -254,28 +254,29 @@ def main_worker(gpu, ngpus_per_node, args):
     '1_DAPI': (1510.9457, 2075.8213),
     '2_AF647': (1369.3427, 2853.1277)}
 
-    normalize = [mt.LoadImaged(keys=normalization_data.keys())]
+    scales_dict = {k:1 for k in normalization_data}
+    normalize = [
+        mt.LoadImaged(keys=normalization_data.keys()),
+        mt.EnsureChannelFirstd( keys = normalization_data.keys(), channel_dim="no_channel"),
+        RandomMultiScaleCropd(keys = normalization_data.keys(), patch_shape=[224,224], selection_fn = lambda x: (x['1_DAPI']>0).float().mean()>0.1, scales_dict=scales_dict)
+    ]
     for k, v in normalization_data.items():
         normalize.append(mt.NormalizeIntensityd(keys=[k], subtrahend = v[0], divisor = v[1]))
-    
     normalize += [
         mt.ConcatItemsd(keys = normalization_data.keys(), name = 'img'),
-        RandomMultiScaleCropd(keys = ['img'], roi_size=[224,224], selection_fn = lambda x: x.nonzero.mean()>0.9),
     ]
-
     augmentation = [
-        mt.RandFlipd(prob=0.5, spatial_axis= [1,2]),
-        mt.RandRotate90d(prob=0.5, spatial_axes=[1,2]),
+        mt.RandFlipd(prob=0.5, spatial_axis= [0,1], keys='img'),
+        mt.RandRotate90d(prob=0.5, spatial_axes=[0,1], keys = 'img'),
     ]
-
     transforms = mt.Compose(normalize + [
-        mec.loader.TwoCropsTransform(transforms.Compose(augmentation), 
-        transforms.Compose(augmentation))
-    ])        
+        mec.loader.TwoCropsTransform(mt.Compose(augmentation),
+        mt.Compose(augmentation))
+    ])       
 
-    df = pd.read_csv(train_dir/'train.csv')
-
-    train_dataset = PersistentDatase(df, transform=transforms, cache_dir = './cache/train')
+    df = pd.read_csv(args.data)
+    df= [row.to_dict() for i,row in df.iterrows()]
+    train_dataset = Dataset(df, transform=transforms)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
         shuffle=True,
         num_workers=args.workers,
@@ -284,7 +285,6 @@ def main_worker(gpu, ngpus_per_node, args):
         drop_last=True,
         persistent_workers=False
     )
-
     momentum_schedule = cosine_scheduler(args.teacher_momentum, 1,
                                          args.epochs, len(train_loader))
 
@@ -329,9 +329,11 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, momentum_schedule,
 
     # switch to train mode
     model.train()
-
+    print(model)
     end = time.time()
-    for i, (images, _) in enumerate(train_loader):
+    print(len(train_loader))
+    for i, images in enumerate(train_loader):
+        images=images["img"].cuda()
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -345,11 +347,11 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, momentum_schedule,
             param_group['lr'] = cur_lr
 
         if args.gpu is not None:
-            images[0] = images[0].cuda(args.gpu, non_blocking=True)
-            images[1] = images[1].cuda(args.gpu, non_blocking=True)
+            images_0 = images[:images.shape[0]//2].cuda(args.gpu, non_blocking=True)
+            images_1 = images[images.shape[0]//2:].cuda(args.gpu, non_blocking=True)
 
         # compute output and loss
-        z1, z2, p1, p2 = model(x1=images[0], x2=images[1])
+        z1, z2, p1, p2 = model(x1=images_0, x2=images_1)
 
         # symmetric between two views, averaged loss by dividing args.m
         mec_loss = (loss_func(p1, z2, lamda_inv) + loss_func(p2, z1, lamda_inv)) * 0.5 / args.m
@@ -369,7 +371,7 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, momentum_schedule,
 
         # momentum update of the parameters of the teacher network
         with torch.no_grad():
-            for param_q, param_k in zip(model.module.encoder.parameters(), model.module.teacher.parameters()):
+            for param_q, param_k in zip(model.encoder.parameters(), model.teacher.parameters()):
                 param_k.data.mul_(momentum).add_((1 - momentum) * param_q.detach().data)
 
         # measure elapsed time
@@ -382,8 +384,8 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, momentum_schedule,
 
 def loss_func(p, z, lamda_inv, order=4):
 
-    p = gather_from_all(p)
-    z = gather_from_all(z)
+    #p = gather_from_all(p)
+    #z = gather_from_all(z)
 
     p = F.normalize(p)
     z = F.normalize(z)
