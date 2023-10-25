@@ -17,6 +17,7 @@ We perform self-supervised pre-training using the proposed MEC method on [ImageN
 * [PyTorch](https://pytorch.org) 1.7.1
 * [Torchvision](https://pytorch.org)  0.8.2 
 * cudatoolkit 10.2
+* monai==1.0.1
 
 
 ## Pretraining
