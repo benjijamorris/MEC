@@ -258,7 +258,7 @@ def main_worker(gpu, ngpus_per_node, args):
     normalize = [
         mt.LoadImaged(keys=normalization_data.keys()),
         mt.EnsureChannelFirstd( keys = normalization_data.keys(), channel_dim="no_channel"),
-        RandomMultiScaleCropd(keys = normalization_data.keys(), patch_shape=[224,224], selection_fn = lambda x: (x['1_DAPI']>0).float().mean()>0.1, scales_dict=scales_dict)
+        RandomMultiScaleCropd(keys = normalization_data.keys(), patch_shape=[224,224], num_samples=16, selection_fn = lambda x: (x['1_DAPI']>0).float().mean()>0.1, scales_dict=scales_dict)
     ]
     for k, v in normalization_data.items():
         normalize.append(mt.NormalizeIntensityd(keys=[k], subtrahend = v[0], divisor = v[1]))
@@ -276,7 +276,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     df = pd.read_csv(args.data)
     df= [row.to_dict() for i,row in df.iterrows()]
-    train_dataset = Dataset(df, transform=transforms)
+    train_dataset = PersistentDataset(df, transform=transforms, cache_dir = './cache')
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
         shuffle=True,
         num_workers=args.workers,
@@ -333,7 +333,8 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, momentum_schedule,
     end = time.time()
     print(len(train_loader))
     for i, images in enumerate(train_loader):
-        images=images["img"].cuda()
+        images = torch.cat([im['img'] for im in images]).cuda()
+        # images=images["img"].cuda()
         # measure data loading time
         data_time.update(time.time() - end)
 
